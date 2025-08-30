@@ -226,3 +226,689 @@ end
 
 -- Show the first tab by default
 ShowTab(1)
+
+--THIS IS THE DIVIDER FOR THE GAME BUILD
+-- Optionally, add statsContent.UpdateStatsTab and lbContent.UpdateLeaderboardTab functions here
+-- For demo purposes, you can add:
+function statsContent:UpdateStatsTab()
+    self.text:SetText("Stats will go here.\nAdd more logic for real stats!")
+end
+function lbContent:UpdateLeaderboardTab()
+    self.text:SetText("Leaderboard will go here.\nAdd more logic for real leaderboard!")
+end
+
+-- You can test them by clicking tabs now!
+
+local function UpdateProgressBar()
+    if signupActive then
+        progressBarBackground:Show()
+        progressBar:SetMinMaxValues(0, 20)
+        progressBar:SetValue(signupTimeLeft)
+        progressBar:SetStatusBarColor(0.17, 0.77, 0.23, 0.85)
+        progressBar.label:SetText("Signups: " .. signupTimeLeft .. "s left")
+    elseif rollActive then
+        progressBarBackground:Show()
+        progressBar:SetMinMaxValues(0, 60)
+        progressBar:SetValue(rollTimeLeft)
+        progressBar:SetStatusBarTexture("Interface\\TARGETINGFRAME\\UI-StatusBar")
+        progressBar:SetStatusBarColor(0.77, 0.47, 0.17, 0.85)
+        progressBar.label:SetText("Rolling: " .. rollTimeLeft .. "s left")
+    else
+        progressBarBackground:Hide()
+    end
+end
+
+local function ResetGame()
+    gameActive, signupActive, rollActive, gameEnded = false, false, false, false
+    signedUpPlayers = {}
+    signupTimer, rollTimer = nil, nil
+    signupTimeLeft, rollTimeLeft = 20, 60
+    tiebreakActive = false
+    tiebreakType = nil
+    tiebreakPlayers = {}
+    tiebreakOriginalValue = nil
+    tiebreakRolls = {}
+    progressBarBackground:Hide()
+end
+
+local function GetSortedSignups()
+    local list = {}
+    for name, info in pairs(signedUpPlayers) do
+        table.insert(list, {name = name, rolled = info.rolled, roll = info.roll})
+    end
+    table.sort(list, function(a, b) return a.name < b.name end)
+    return list
+end
+
+local function GetWinner()
+    local maxRoll = nil
+    local winners = {}
+    for name, info in pairs(signedUpPlayers) do
+        if info.roll then
+            if not maxRoll or info.roll > maxRoll then
+                maxRoll = info.roll
+                winners = {name}
+            elseif info.roll == maxRoll then
+                table.insert(winners, name)
+            end
+        end
+    end
+    return winners, maxRoll
+end
+
+local function GetLoser()
+    local minRoll = nil
+    local losers = {}
+    for name, info in pairs(signedUpPlayers) do
+        if info.roll then
+            if not minRoll or info.roll < minRoll then
+                minRoll = info.roll
+                losers = {name}
+            elseif info.roll == minRoll then
+                table.insert(losers, name)
+            end
+        end
+    end
+    return losers, minRoll
+end
+
+local function AllPlayersRolled()
+    for _, info in pairs(signedUpPlayers) do
+        if not info.rolled then return false end
+    end
+    return true
+end
+
+local function AnnounceAndTrackChickens()
+    local chickens = {}
+    for name, info in pairs(signedUpPlayers) do
+        if not info.rolled then
+            if not MLBRollDB[name] then
+                MLBRollDB[name] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0}
+            end
+            MLBRollDB[name].chickens = (MLBRollDB[name].chickens or 0) + 1
+            table.insert(chickens, name)
+        end
+    end
+    for _, name in ipairs(chickens) do
+        SendChatMessage("MLB Roll: " .. name .. " chickened out!", "RAID")
+    end
+end
+
+local function UpdateGameTab()
+    UpdateProgressBar()
+    local status = ""
+    if not hasShownWelcome then
+        hasShownWelcome = true
+        status = "|cffffff00Welcome to MLB Roll!|r\n\nSet your roll max and click Start Game. Type \"1\" in raid chat to sign up."
+    elseif lastResult then
+        status = string.format("|cff00ff00Winner: %s (%d)|r\n|cffff3333Loser: %s (%d)|r\n|cffffff00Payout: %s owes %s %d gold|r",
+            lastResult.winner, lastResult.winRoll, lastResult.loser, lastResult.loseRoll, lastResult.loser, lastResult.winner, lastResult.payout)
+    elseif not gameActive then
+        status = "No game result yet. Start a game to play MLB Roll!"
+    else
+        if signupActive then
+            status = "Game Started!\nRoll range: |cffffff00" .. currentMax .. "|r\n"
+            local signups = GetSortedSignups()
+            if #signups == 0 then
+                status = status .. "Waiting for players to sign up in raid chat with \"1\"..."
+            else
+                status = status .. "Signed-up players:\n"
+                for _, info in ipairs(signups) do
+                    status = status .. ("|cffffff00%s|r\n"):format(info.name)
+                end
+            end
+        elseif rollActive then
+            status = "Signups closed!\nRoll range: |cffffff00" .. currentMax .. "|r\n"
+            local signups = GetSortedSignups()
+            for _, info in ipairs(signups) do
+                if info.rolled and info.roll then
+                    status = status .. ("|cff00ff00%s|r rolled |cffffff00%d|r\n"):format(info.name, info.roll)
+                else
+                    status = status .. ("|cffffff00%s|r (waiting to roll)\n"):format(info.name)
+                end
+            end
+        elseif tiebreakActive then
+            if tiebreakType == "winner" then
+                status = "Tiebreak for winner!\nTied high rollers (" .. tiebreakOriginalValue .. "):\n"
+            elseif tiebreakType == "loser" then
+                status = "Tiebreak for loser!\nTied low rollers (" .. tiebreakOriginalValue .. "):\n"
+            end
+            for _, name in ipairs(tiebreakPlayers) do
+                status = status .. ("|cffffff00%s|r\n"):format(name)
+            end
+            status = status .. "\nOnly tied players should roll again."
+        elseif gameEnded then
+            status = "Game Ended!\nNo winner or loser detected."
+        end
+    end
+    gameContent.text:SetText(status)
+end
+
+local function EndSignupPeriod()
+    signupActive = false
+    UpdateGameTab()
+    local signups = GetSortedSignups()
+    if #signups == 0 then
+        gameActive = false
+        SendChatMessage("MLB Roll: No Signups Received", "RAID")
+        gameEnded = true
+        UpdateGameTab()
+        return
+    end
+
+    rollActive = true
+    rollTimeLeft = 60
+    UpdateGameTab()
+    SendChatMessage("MLB Roll: Signups closed! You have 60 seconds to roll.", "RAID")
+    UpdateProgressBar()
+    rollTimer = C_Timer.NewTicker(1, function()
+        rollTimeLeft = rollTimeLeft - 1
+        UpdateProgressBar()
+        if rollTimeLeft == 30 then
+            local notRolled = {}
+            for name, info in pairs(signedUpPlayers) do
+                if not info.rolled then table.insert(notRolled, name) end
+            end
+            if #notRolled > 0 then
+                SendChatMessage("MLB Roll: 30 seconds left to roll! Waiting on: " .. table.concat(notRolled, ", "), "RAID")
+            end
+        end
+        UpdateGameTab()
+        if AllPlayersRolled() or rollTimeLeft <= 0 then
+            rollTimer:Cancel()
+            rollActive = false
+            local highTies, highRoll = GetWinner()
+            local lowTies, lowRoll = GetLoser()
+            local anyRolled = false
+            for _, info in pairs(signedUpPlayers) do
+                if info.rolled then
+                    anyRolled = true
+                    break
+                end
+            end
+            if not anyRolled then
+                gameActive = false
+                gameEnded = true
+                UpdateGameTab()
+                SendChatMessage("MLB Roll: No one rolled!", "RAID")
+                AnnounceAndTrackChickens()
+                return
+            end
+            if #highTies > 1 then
+                tiebreakActive = true
+                tiebreakType = "winner"
+                tiebreakPlayers = highTies
+                tiebreakOriginalValue = highRoll
+                tiebreakRolls = {}
+                UpdateGameTab()
+                SendChatMessage("MLB Roll: Tiebreak for WINNER! " .. table.concat(highTies, " and ") .. " tied with " .. highRoll .. ". Please /roll " .. currentMax .. " again!", "RAID")
+            elseif #lowTies > 1 then
+                tiebreakActive = true
+                tiebreakType = "loser"
+                tiebreakPlayers = lowTies
+                tiebreakOriginalValue = lowRoll
+                tiebreakRolls = {}
+                UpdateGameTab()
+                SendChatMessage("MLB Roll: Tiebreak for LOSER! " .. table.concat(lowTies, " and ") .. " tied with " .. lowRoll .. ". Please /roll " .. currentMax .. " again!", "RAID")
+            else
+                gameActive = false
+                gameEnded = true
+                lastResult = {
+                    winner = highTies[1],
+                    winRoll = highRoll,
+                    loser = lowTies[1],
+                    loseRoll = lowRoll,
+                    payout = highRoll - lowRoll
+                }
+                UpdateGameTab()
+                local winner = highTies[1]
+                local loser = lowTies[1]
+                SendChatMessage("MLB Roll: Winner is " .. winner .. " with " .. highRoll .. "! Loser is " .. loser .. " with " .. lowRoll .. ".", "RAID")
+                local payout = highRoll - lowRoll
+                if payout > 0 then
+                    SendChatMessage("MLB Roll: " .. loser .. " owes " .. winner .. " " .. payout .. " gold.", "RAID")
+                end
+                if not MLBRollDB[winner] then MLBRollDB[winner] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0} end
+                MLBRollDB[winner].wins = MLBRollDB[winner].wins + 1
+                MLBRollDB[winner].goldReceived = MLBRollDB[winner].goldReceived + payout
+                if not MLBRollDB[loser] then MLBRollDB[loser] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0} end
+                MLBRollDB[loser].losses = MLBRollDB[loser].losses + 1
+                MLBRollDB[loser].goldGiven = MLBRollDB[loser].goldGiven + payout
+                AnnounceAndTrackChickens()
+            end
+        end
+    end)
+end
+
+local function StartSignupPeriod()
+    signupActive = true
+    rollActive = false
+    gameEnded = false
+    signupTimeLeft = 20
+    UpdateGameTab()
+    UpdateProgressBar()
+    signupTimer = C_Timer.NewTicker(1, function()
+        signupTimeLeft = signupTimeLeft - 1
+        UpdateProgressBar()
+        if signupTimeLeft == 5 then
+            SendChatMessage("MLB Roll: Signups close in 5 seconds!", "RAID")
+        end
+        if signupTimeLeft <= 0 then
+            signupTimer:Cancel()
+            EndSignupPeriod()
+        end
+    end)
+end
+
+gameContent.startBtn:SetScript("OnClick", function()
+    local val = tonumber(gameContent.editBox:GetText())
+    if not val or val < 2 or val > 1000000 then
+        print("Enter a valid roll max (2-1000000)")
+        return
+    end
+    currentMax = val
+    ResetGame()
+    gameActive = true
+    UpdateGameTab()
+    SendChatMessage("MLB Roll " .. currentMax .. " Game Started. Enter '1' to Join Game. Signups close in 20 seconds.", "RAID")
+    StartSignupPeriod()
+end)
+
+gameContent.endBtn:SetScript("OnClick", function()
+    if not gameActive and not signupActive and not rollActive and not tiebreakActive then return end
+    if signupTimer then signupTimer:Cancel() end
+    if rollTimer then rollTimer:Cancel() end
+    gameActive = false
+    signupActive = false
+    rollActive = false
+    tiebreakActive = false
+    gameEnded = true
+    UpdateGameTab()
+    local highTies, highRoll = GetWinner()
+    local lowTies, lowRoll = GetLoser()
+    if #highTies > 1 then
+        SendChatMessage("MLB Roll: Tiebreak for WINNER! " .. table.concat(highTies, " and ") .. " tied with " .. highRoll .. ".", "RAID")
+    elseif #lowTies > 1 then
+        SendChatMessage("MLB Roll: Tiebreak for LOSER! " .. table.concat(lowTies, " and ") .. " tied with " .. lowRoll .. ".", "RAID")
+    else
+        lastResult = {
+            winner = highTies[1],
+            winRoll = highRoll,
+            loser = lowTies[1],
+            loseRoll = lowRoll,
+            payout = highRoll - lowRoll
+        }
+        UpdateGameTab()
+        local winner = highTies[1]
+        local loser = lowTies[1]
+        SendChatMessage("MLB Roll: Winner is " .. winner .. " with " .. highRoll .. "! Loser is " .. loser .. " with " .. lowRoll .. ".", "RAID")
+        local payout = highRoll - lowRoll
+        if payout > 0 then
+            SendChatMessage("MLB Roll: " .. loser .. " owes " .. winner .. " " .. payout .. " gold.", "RAID")
+        end
+        AnnounceAndTrackChickens()
+    end
+end)
+
+frame:SetScript("OnHide", function()
+    if gameContent.editBox then
+        gameContent.editBox:ClearFocus()
+    end
+end)
+
+local eventFrame = CreateFrame("Frame")
+eventFrame:RegisterEvent("CHAT_MSG_RAID")
+eventFrame:RegisterEvent("CHAT_MSG_RAID_LEADER")
+eventFrame:RegisterEvent("CHAT_MSG_SYSTEM")
+eventFrame:SetScript("OnEvent", function(self, event, msg, author)
+    if not gameActive and not tiebreakActive then return end
+
+    if signupActive and (event == "CHAT_MSG_RAID" or event == "CHAT_MSG_RAID_LEADER") and msg and msg:trim() == "1" then
+        local name = author and author ~= "" and author:match("^[^-]+") or UnitName("player")
+        if not signedUpPlayers[name] then
+            signedUpPlayers[name] = {rolled = false, roll = nil}
+            UpdateGameTab()
+        end
+        return
+    end
+
+    if rollActive and event == "CHAT_MSG_SYSTEM" then
+        local player, roll, min, max = msg:match("(.+) rolls (%d+) %((%d+)%-(%d+)%)")
+        if player then
+            player = player:match("^[^-]+")
+            if signedUpPlayers[player] then
+                if tonumber(min) ~= 1 or tonumber(max) ~= currentMax then
+                    SendChatMessage("Roll Rejected. Roll 1-" .. currentMax, "WHISPER", nil, player)
+                    return
+                end
+                if not signedUpPlayers[player].rolled then
+                    signedUpPlayers[player].rolled = true
+                    signedUpPlayers[player].roll = tonumber(roll)
+                    UpdateGameTab()
+                    if AllPlayersRolled() and rollActive and rollTimer then
+                        rollTimer:Cancel()
+                        rollActive = false
+                        local highTies, highRoll = GetWinner()
+                        local lowTies, lowRoll = GetLoser()
+                        local anyRolled = false
+                        for _, info in pairs(signedUpPlayers) do
+                            if info.rolled then
+                                anyRolled = true
+                                break
+                            end
+                        end
+                        if not anyRolled then
+                            gameActive = false
+                            gameEnded = true
+                            UpdateGameTab()
+                            SendChatMessage("MLB Roll: No one rolled!", "RAID")
+                            AnnounceAndTrackChickens()
+                            return
+                        end
+                        if #highTies > 1 then
+                            tiebreakActive = true
+                            tiebreakType = "winner"
+                            tiebreakPlayers = highTies
+                            tiebreakOriginalValue = highRoll
+                            tiebreakRolls = {}
+                            UpdateGameTab()
+                            SendChatMessage("MLB Roll: Tiebreak for WINNER! " .. table.concat(highTies, " and ") .. " tied with " .. highRoll .. ". Please /roll " .. currentMax .. " again!", "RAID")
+                        elseif #lowTies > 1 then
+                            tiebreakActive = true
+                            tiebreakType = "loser"
+                            tiebreakPlayers = lowTies
+                            tiebreakOriginalValue = lowRoll
+                            tiebreakRolls = {}
+                            UpdateGameTab()
+                            SendChatMessage("MLB Roll: Tiebreak for LOSER! " .. table.concat(lowTies, " and ") .. " tied with " .. lowRoll .. ". Please /roll " .. currentMax .. " again!", "RAID")
+                        else
+                            gameActive = false
+                            gameEnded = true
+                            lastResult = {
+                                winner = highTies[1],
+                                winRoll = highRoll,
+                                loser = lowTies[1],
+                                loseRoll = lowRoll,
+                                payout = highRoll - lowRoll
+                            }
+                            UpdateGameTab()
+                            local winner = highTies[1]
+                            local loser = lowTies[1]
+                            SendChatMessage("MLB Roll: Winner is " .. winner .. " with " .. highRoll .. "! Loser is " .. loser .. " with " .. lowRoll .. ".", "RAID")
+                            local payout = highRoll - lowRoll
+                            if payout > 0 then
+                                SendChatMessage("MLB Roll: " .. loser .. " owes " .. winner .. " " .. payout .. " gold.", "RAID")
+                            end
+                            if not MLBRollDB[winner] then MLBRollDB[winner] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0} end
+                            MLBRollDB[winner].wins = MLBRollDB[winner].wins + 1
+                            MLBRollDB[winner].goldReceived = MLBRollDB[winner].goldReceived + payout
+                            if not MLBRollDB[loser] then MLBRollDB[loser] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0} end
+                            MLBRollDB[loser].losses = MLBRollDB[loser].losses + 1
+                            MLBRollDB[loser].goldGiven = MLBRollDB[loser].goldGiven + payout
+                            AnnounceAndTrackChickens()
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if tiebreakActive and event == "CHAT_MSG_SYSTEM" then
+        local player, roll, min, max = msg:match("(.+) rolls (%d+) %((%d+)%-(%d+)%)")
+        if player then
+            player = player:match("^[^-]+")
+            if tiebreakRolls[player] then return end
+            for _, tieName in ipairs(tiebreakPlayers) do
+                if player == tieName then
+                    if tonumber(min) ~= 1 or tonumber(max) ~= currentMax then
+                        SendChatMessage("Tiebreak Roll Rejected. Roll 1-" .. currentMax, "WHISPER", nil, player)
+                        return
+                    end
+                    tiebreakRolls[player] = tonumber(roll)
+                    local allRolled = true
+                    for _, tieNameCheck in ipairs(tiebreakPlayers) do
+                        if not tiebreakRolls[tieNameCheck] then allRolled = false break end
+                    end
+                    if allRolled then
+                        local tbBest = nil
+                        local tbNames = {}
+                        for _, tieName in ipairs(tiebreakPlayers) do
+                            local r = tiebreakRolls[tieName]
+                            if tiebreakType == "winner" then
+                                if not tbBest or r > tbBest then
+                                    tbBest = r
+                                    tbNames = {tieName}
+                                elseif r == tbBest then
+                                    table.insert(tbNames, tieName)
+                                end
+                            elseif tiebreakType == "loser" then
+                                if not tbBest or r < tbBest then
+                                    tbBest = r
+                                    tbNames = {tieName}
+                                elseif r == tbBest then
+                                    table.insert(tbNames, tieName)
+                                end
+                            end
+                        end
+
+                        if #tbNames > 1 then
+                            tiebreakPlayers = tbNames
+                            tiebreakRolls = {}
+                            UpdateGameTab()
+                            if tiebreakType == "winner" then
+                                SendChatMessage("MLB Roll: Tiebreak for WINNER! " .. table.concat(tbNames, " and ") .. " tied (" .. tbBest .. "). Please /roll " .. currentMax .. " again!", "RAID")
+                            elseif tiebreakType == "loser" then
+                                SendChatMessage("MLB Roll: Tiebreak for LOSER! " .. table.concat(tbNames, " and ") .. " tied (" .. tbBest .. "). Please /roll " .. currentMax .. " again!", "RAID")
+                            end
+                        else
+                            local winner, loser, winRoll, loseRoll
+                            if tiebreakType == "winner" then
+                                winner = tbNames[1]
+                                winRoll = tiebreakOriginalValue
+                                local lowTies, lowRoll = GetLoser()
+                                loser = lowTies[1]
+                                loseRoll = lowRoll
+                            else
+                                loser = tbNames[1]
+                                loseRoll = tiebreakOriginalValue
+                                local highTies, highRoll = GetWinner()
+                                winner = highTies[1]
+                                winRoll = highRoll
+                            end
+                            tiebreakActive = false
+                            gameActive = false
+                            gameEnded = true
+                            lastResult = {
+                                winner = winner,
+                                winRoll = winRoll,
+                                loser = loser,
+                                loseRoll = loseRoll,
+                                payout = winRoll - loseRoll
+                            }
+                            UpdateGameTab()
+                            SendChatMessage("MLB Roll: Winner is " .. winner .. " with " .. winRoll .. "! Loser is " .. loser .. " with " .. loseRoll .. ".", "RAID")
+                            local payout = winRoll - loseRoll
+                            if payout > 0 then
+                                SendChatMessage("MLB Roll: " .. loser .. " owes " .. winner .. " " .. payout .. " gold.", "RAID")
+                            end
+                            if not MLBRollDB[winner] then MLBRollDB[winner] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0} end
+                            MLBRollDB[winner].wins = MLBRollDB[winner].wins + 1
+                            MLBRollDB[winner].goldReceived = MLBRollDB[winner].goldReceived + payout
+                            if not MLBRollDB[loser] then MLBRollDB[loser] = {wins=0, losses=0, goldReceived=0, goldGiven=0, chickens=0} end
+                            MLBRollDB[loser].losses = MLBRollDB[loser].losses + 1
+                            MLBRollDB[loser].goldGiven = MLBRollDB[loser].goldGiven + payout
+                            AnnounceAndTrackChickens()
+                        end
+                    end
+                end
+            end
+        end
+    end
+end)
+
+local function ShowTab(tab)
+    activeTab = tab
+    for i, t in ipairs(tabs) do
+        if i == tab then
+            t:SetBackdropColor(0.18, 0.34, 0.64, 1)
+            t.button.label:SetTextColor(1,1,0.7)
+        else
+            t:SetBackdropColor(0.13, 0.20, 0.32, 0.92)
+            t.button.label:SetTextColor(0.85,0.85,0.95,1)
+        end
+    end
+    for i, content in ipairs(frame.tabContents) do
+        if i == tab then content:Show() else content:Hide() end
+    end
+    if gameContent.editBox then
+        gameContent.editBox:ClearFocus()
+    end
+end
+
+frame:SetScript("OnHide", function()
+    if gameContent.editBox then
+        gameContent.editBox:ClearFocus()
+    end
+end)
+
+local function UpdateStatsTab()
+    local player = UnitName("player")
+    local stats = MLBRollDB[player]
+    if not stats then
+        statsContent.text:SetText("This is the Stats tab.\n\nNo stats recorded for you yet.")
+        return
+    end
+    local txt = "Your MLB Roll Stats:\n\n"
+    txt = txt .. ("Wins: %d\nLosses: %d\nGold Given: %d\nGold Received: %d\nChickens: %d\n"):format(stats.wins or 0, stats.losses or 0, stats.goldGiven or 0, stats.goldReceived or 0, stats.chickens or 0)
+    statsContent.text:SetText(txt)
+end
+
+statsContent:SetScript("OnShow", UpdateStatsTab)
+
+local function GetSortedLeaderboard()
+    local sorted_winners = {}
+    local sorted_losers = {}
+    local sorted_chickens = {}
+    for name, stats in pairs(MLBRollDB) do
+        table.insert(sorted_winners, {name=name, gold=stats.goldReceived or 0})
+        table.insert(sorted_losers, {name=name, gold=stats.goldGiven or 0})
+        table.insert(sorted_chickens, {name=name, chickens=stats.chickens or 0})
+    end
+    table.sort(sorted_winners, function(a,b) return a.gold > b.gold end)
+    table.sort(sorted_losers, function(a,b) return a.gold > b.gold end)
+    table.sort(sorted_chickens, function(a,b) return a.chickens > b.chickens end)
+    return sorted_winners, sorted_losers, sorted_chickens
+end
+
+local function AnnounceTop5WinnersAndLosers()
+    local sorted_winners, sorted_losers = GetSortedLeaderboard()
+    SendChatMessage("MLB Roll Leaderboard - Top 5 Winners (Gold Won):", "RAID")
+    for i,v in ipairs(sorted_winners) do
+        if i > 5 then break end
+        SendChatMessage(("%d. %s - %d gold"):format(i, v.name, v.gold), "RAID")
+    end
+    SendChatMessage("MLB Roll Leaderboard - Top 5 Losers (Gold Lost):", "RAID")
+    for i,v in ipairs(sorted_losers) do
+        if i > 5 then break end
+        SendChatMessage(("%d. %s - %d gold"):format(i, v.name, v.gold), "RAID")
+    end
+end
+
+local function AnnounceTop5Chickens()
+    local _, _, sorted_chickens = GetSortedLeaderboard()
+    SendChatMessage("MLB Roll Leaderboard - Top 5 Chickens:", "RAID")
+    for i,v in ipairs(sorted_chickens) do
+        if i > 5 then break end
+        SendChatMessage(("%d. %s - %d chickens"):format(i, v.name, v.chickens), "RAID")
+    end
+end
+
+local function AnnounceTop30Losers()
+    local _, sorted_losers = GetSortedLeaderboard()
+    SendChatMessage("MLB Roll Leaderboard - Top 30 Losers (Gold Lost):", "RAID")
+    for i,v in ipairs(sorted_losers) do
+        if i > 30 then break end
+        SendChatMessage(("%d. %s - %d gold"):format(i, v.name, v.gold), "RAID")
+    end
+end
+
+local function CreateAnnounceButton(parent, x, y, label, tooltip, onClick)
+    local btn = CreateFrame("Button", nil, parent, "GameMenuButtonTemplate")
+    btn:SetSize(32, 22)
+    btn:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    btn:SetText(label)
+    btn:SetScript("OnClick", onClick)
+    btn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOMRIGHT")
+        GameTooltip:SetText(tooltip)
+        GameTooltip:Show()
+    end)
+    btn:SetScript("OnLeave", function(self) GameTooltip:Hide() end)
+    return btn
+end
+
+local function UpdateLeaderboardTab()
+    local sorted_winners, sorted_losers, sorted_chickens = GetSortedLeaderboard()
+    local txt = ""
+    txt = txt .. "Top 5 Winners (Gold Won):\n"
+    for i=1, math.min(5, #sorted_winners) do
+        local v = sorted_winners[i]
+        txt = txt .. ("%d. %s - %d gold\n"):format(i, v.name, v.gold)
+    end
+    txt = txt .. "\nTop 5 Losers (Gold Lost):\n"
+    for i=1, math.min(5, #sorted_losers) do
+        local v = sorted_losers[i]
+        txt = txt .. ("%d. %s - %d gold\n"):format(i, v.name, v.gold)
+    end
+    txt = txt .. "\nTop 5 Chickens:\n"
+    for i=1, math.min(5, #sorted_chickens) do
+        local v = sorted_chickens[i]
+        txt = txt .. ("%d. %s - %d chickens\n"):format(i, v.name, v.chickens)
+    end
+    txt = txt .. "\nTop 30 Losers (Gold Lost):\n"
+    for i=1, math.min(30, #sorted_losers) do
+        local v = sorted_losers[i]
+        txt = txt .. ("%d. %s - %d gold\n"):format(i, v.name, v.gold)
+    end
+    lbContent.text:SetText(txt)
+
+    if not lbContent.announceBtn1 then
+        lbContent.announceBtn1 = CreateAnnounceButton(lbContent, 0, 0, "🥇🥈", "Announce Top5 Winners & Losers", AnnounceTop5WinnersAndLosers)
+        lbContent.announceBtn2 = CreateAnnounceButton(lbContent, 40, 0, "🐔", "Announce Top5 Chickens", AnnounceTop5Chickens)
+        lbContent.announceBtn3 = CreateAnnounceButton(lbContent, 80, 0, "💸", "Announce Top30 Losers", AnnounceTop30Losers)
+    end
+end
+
+lbContent:SetScript("OnShow", UpdateLeaderboardTab)
+
+ShowTab(1)
+UpdateGameTab()
+
+frame:Hide()
+
+SLASH_MLB1 = "/mlb"
+SlashCmdList["MLB"] = function()
+    if frame:IsShown() then
+        frame:Hide()
+    else
+        frame:Show()
+        if gameContent.editBox then
+            gameContent.editBox:ClearFocus()
+        end
+        UpdateGameTab()
+    end
+end
+
+SLASH_MLBROLL1 = "/mlbroll"
+SlashCmdList["MLBROLL"] = function()
+    if frame:IsShown() then
+        frame:Hide()
+    else
+        frame:Show()
+        if gameContent.editBox then
+            gameContent.editBox:ClearFocus()
+        end
+        UpdateGameTab()
+    end
+end
