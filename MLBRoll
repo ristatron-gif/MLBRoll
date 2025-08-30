@@ -1,0 +1,228 @@
+local FRAME_WIDTH, FRAME_HEIGHT = 420, 390
+local PADDING = 18
+
+local ROUNDED_EDGE = "Interface\\Tooltips\\UI-Tooltip-Border"
+local ROUNDED_EDGE_SIZE = 14
+local MAIN_INSETS = { left = 4, right = 4, top = 4, bottom = 4 }
+local SUB_INSETS = { left = 3, right = 3, top = 3, bottom = 3 }
+
+local frame = CreateFrame("Frame", "MLBRollFrame", UIParent, "BackdropTemplate")
+frame:SetSize(FRAME_WIDTH, FRAME_HEIGHT)
+frame:SetPoint("CENTER")
+frame:SetMovable(true)
+frame:EnableMouse(true)
+frame:RegisterForDrag("LeftButton")
+frame:SetScript("OnDragStart", frame.StartMoving)
+frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+frame:SetBackdrop({
+    bgFile = "Interface\\FrameGeneral\\UI-Background-Rock",
+    edgeFile = ROUNDED_EDGE,
+    tile = true, tileSize = 32, edgeSize = ROUNDED_EDGE_SIZE,
+    insets = MAIN_INSETS
+})
+frame:SetBackdropColor(0.10, 0.13, 0.19, 0.98)
+frame:SetToplevel(true)
+frame:SetUserPlaced(true)
+tinsert(UISpecialFrames, frame:GetName())
+
+local title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+title:SetPoint("TOP", frame, "TOP", 0, -18)
+title:SetText("MLB Roll")
+title:SetFont(title:GetFont(), 22)
+title:SetTextColor(0.95, 0.95, 1, 1)
+
+local subtitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+subtitle:SetPoint("TOP", title, "BOTTOM", 0, -2)
+subtitle:SetText("Made By Rist to Steal Your Gold")
+subtitle:SetFont(subtitle:GetFont(), 11)
+subtitle:SetTextColor(1, 0.85, 0.2, 1)
+
+local progressBarBackground = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+progressBarBackground:SetSize(FRAME_WIDTH - 2*PADDING, 20)
+progressBarBackground:SetPoint("TOP", frame, "TOP", 0, -58)
+progressBarBackground:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = ROUNDED_EDGE,
+    tile = false, tileSize = 0, edgeSize = ROUNDED_EDGE_SIZE,
+    insets = SUB_INSETS
+})
+progressBarBackground:SetBackdropColor(0.17,0.22,0.28,0.95)
+progressBarBackground:Hide()
+
+local progressBar = CreateFrame("StatusBar", nil, progressBarBackground, "BackdropTemplate")
+progressBar:SetSize(FRAME_WIDTH - 2*PADDING - 6, 14)
+progressBar:SetPoint("CENTER", progressBarBackground, "CENTER", 0, 0)
+progressBar:SetStatusBarTexture("Interface\\TARGETINGFRAME\\UI-StatusBar")
+progressBar.label = progressBar:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+progressBar.label:SetPoint("CENTER", progressBar, "CENTER", 0, 0)
+progressBar.label:SetText("")
+
+local tabNames = {"Game", "Stats", "Leaderboard"}
+local tabs, frame_tabContents = {}, {}
+local activeTab = 1
+frame.tabContents = frame_tabContents
+
+local hasShownWelcome = false
+local lastResult = nil
+
+local gameActive, signupActive, rollActive, gameEnded = false, false, false, false
+local currentMax = 1000
+local signedUpPlayers = {} -- [name] = {rolled = false, roll = nil}
+local signupTimer, rollTimer = nil, nil
+local signupTimeLeft, rollTimeLeft = 20, 60
+local tiebreakActive = false
+local tiebreakType = nil -- "winner" or "loser"
+local tiebreakPlayers = {}
+local tiebreakOriginalValue = nil
+local tiebreakRolls = {}
+
+if not MLBRollDB then MLBRollDB = {} end
+
+-- Tab content frames
+local gameContent = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+gameContent:SetSize(FRAME_WIDTH-2*PADDING, FRAME_HEIGHT-140)
+gameContent:SetPoint("TOPLEFT", frame, "TOPLEFT", PADDING, -85)
+frame.tabContents[1] = gameContent
+
+local statsContent = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+statsContent:SetSize(FRAME_WIDTH-2*PADDING, FRAME_HEIGHT-140)
+statsContent:SetPoint("TOPLEFT", frame, "TOPLEFT", PADDING, -85)
+statsContent.text = statsContent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+statsContent.text:SetPoint("TOPLEFT", statsContent, "TOPLEFT", 12, -8)
+statsContent.text:SetJustifyH("LEFT")
+statsContent.text:SetFont(statsContent.text:GetFont(), 14)
+statsContent.text:SetWidth(statsContent:GetWidth()-24)
+statsContent.text:SetHeight(statsContent:GetHeight()-24)
+statsContent:Hide()
+frame.tabContents[2] = statsContent
+
+local lbContent = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+lbContent:SetSize(FRAME_WIDTH-2*PADDING, FRAME_HEIGHT-140)
+lbContent:SetPoint("TOPLEFT", frame, "TOPLEFT", PADDING, -85)
+lbContent.text = lbContent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+lbContent.text:SetPoint("TOPLEFT", lbContent, "TOPLEFT", 12, -8)
+lbContent.text:SetJustifyH("LEFT")
+lbContent.text:SetFont(lbContent.text:GetFont(), 14)
+lbContent.text:SetWidth(lbContent:GetWidth()-24)
+lbContent.text:SetHeight(lbContent:GetHeight()-24)
+lbContent:Hide()
+frame.tabContents[3] = lbContent
+
+-- Tab switching function (define FIRST so OnClick handlers work)
+local function ShowTab(tab)
+    activeTab = tab
+    for i, t in ipairs(tabs) do
+        if i == tab then
+            t:SetBackdropColor(0.18, 0.34, 0.64, 1)
+            t.button.label:SetTextColor(1,1,0.7)
+        else
+            t:SetBackdropColor(0.13, 0.20, 0.32, 0.92)
+            t.button.label:SetTextColor(0.85,0.85,0.95,1)
+        end
+    end
+    for i, content in ipairs(frame.tabContents) do
+        if i == tab then content:Show() else content:Hide() end
+    end
+    -- Optionally, update tab content if needed
+    if tab == 2 and statsContent.UpdateStatsTab then statsContent:UpdateStatsTab() end
+    if tab == 3 and lbContent.UpdateLeaderboardTab then lbContent:UpdateLeaderboardTab() end
+end
+
+-- Tab setup (AFTER ShowTab is defined!)
+for i, name in ipairs(tabNames) do
+    local tabBg = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    tabBg:SetSize(120, 28)
+    tabBg:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", PADDING + (i-1)*128, PADDING-2)
+    tabBg:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = ROUNDED_EDGE,
+        tile = false, tileSize = 0, edgeSize = ROUNDED_EDGE_SIZE,
+        insets = SUB_INSETS
+    })
+    tabBg:SetBackdropColor(0.13, 0.20, 0.32, 0.92)
+    tabBg:EnableMouse(true)
+    tabBg:SetFrameLevel(frame:GetFrameLevel() + 1)
+
+    local tabBtn = CreateFrame("Button", nil, tabBg)
+    tabBtn:SetAllPoints(tabBg)
+    tabBtn.label = tabBtn:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    tabBtn.label:SetPoint("CENTER", tabBtn, "CENTER", 0, 1)
+    tabBtn.label:SetText(name)
+    tabBtn.label:SetTextColor(0.85,0.85,0.95,1)
+    tabBtn:SetScript("OnClick", function() ShowTab(i) end)
+    tabs[i] = tabBg
+    tabs[i].button = tabBtn
+end
+
+-- Game tab controls
+local controlBox = CreateFrame("Frame", nil, gameContent, "BackdropTemplate")
+controlBox:SetSize(gameContent:GetWidth()-6, 46)
+controlBox:SetPoint("TOPLEFT", gameContent, "TOPLEFT", 3, -3)
+controlBox:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = ROUNDED_EDGE,
+    tile = false, tileSize = 0, edgeSize = ROUNDED_EDGE_SIZE,
+    insets = SUB_INSETS
+})
+controlBox:SetBackdropColor(0.22, 0.24, 0.38, 0.98)
+
+local editBoxLabel = controlBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+editBoxLabel:SetPoint("LEFT", controlBox, "LEFT", 16, 0)
+editBoxLabel:SetText("Roll Max:")
+editBoxLabel:SetTextColor(0.98, 0.95, 0.65, 1)
+
+gameContent.editBox = CreateFrame("EditBox", nil, controlBox, "InputBoxTemplate")
+gameContent.editBox:SetSize(92, 26)
+gameContent.editBox:SetPoint("LEFT", editBoxLabel, "RIGHT", 10, 0)
+gameContent.editBox:SetAutoFocus(false)
+gameContent.editBox:SetText("1000")
+gameContent.editBox:SetScript("OnEnterPressed", function(self)
+    self:ClearFocus()
+end)
+
+gameContent.startBtn = CreateFrame("Button", nil, controlBox, "GameMenuButtonTemplate")
+gameContent.startBtn:SetSize(90, 26)
+gameContent.startBtn:SetPoint("LEFT", gameContent.editBox, "RIGHT", 12, 0)
+gameContent.startBtn:SetText("Start Game")
+gameContent.startBtn:SetNormalFontObject("GameFontHighlightLarge")
+gameContent.startBtn:SetHighlightTexture("Interface\\Buttons\\UI-Button-Highlight")
+
+gameContent.endBtn = CreateFrame("Button", nil, controlBox, "GameMenuButtonTemplate")
+gameContent.endBtn:SetSize(90, 26)
+gameContent.endBtn:SetPoint("LEFT", gameContent.startBtn, "RIGHT", 12, 0)
+gameContent.endBtn:SetText("End Game")
+gameContent.endBtn:SetNormalFontObject("GameFontNormalLarge")
+
+local statusBox = CreateFrame("Frame", nil, gameContent, "BackdropTemplate")
+statusBox:SetSize(gameContent:GetWidth()-6, gameContent:GetHeight()-60)
+statusBox:SetPoint("TOPLEFT", gameContent, "TOPLEFT", 3, -55)
+statusBox:SetBackdrop({
+    bgFile = "Interface\\Buttons\\WHITE8x8",
+    edgeFile = ROUNDED_EDGE,
+    tile = false, tileSize = 0, edgeSize = ROUNDED_EDGE_SIZE,
+    insets = SUB_INSETS
+})
+statusBox:SetBackdropColor(0.16, 0.17, 0.22, 0.93)
+
+gameContent.text = statusBox:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+gameContent.text:SetPoint("TOPLEFT", statusBox, "TOPLEFT", 12, -18)
+gameContent.text:SetJustifyH("LEFT")
+gameContent.text:SetJustifyV("TOP")
+gameContent.text:SetFont(gameContent.text:GetFont(), 11)
+gameContent.text:SetWidth(statusBox:GetWidth()-24)
+
+local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
+closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -8, -8)
+
+-- Default tab content
+gameContent.text:SetText("No game result yet. Start a game to play MLB Roll!")
+
+function statsContent:UpdateStatsTab()
+    self.text:SetText("Stats will go here.\nAdd more logic for real stats!")
+end
+function lbContent:UpdateLeaderboardTab()
+    self.text:SetText("Leaderboard will go here.\nAdd more logic for real leaderboard!")
+end
+
+-- Show the first tab by default
+ShowTab(1)
